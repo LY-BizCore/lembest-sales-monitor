@@ -1,0 +1,808 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0"/>
+<title>Sales Monitor</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/tabler-icons/2.40.0/iconfont/tabler-icons.min.css"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+<script>
+  firebase.initializeApp({
+    apiKey:"AIzaSyAYFMZmnCz937TbCMAWDFCkC3hJVa_1t80",
+    authDomain:"sales-monitor-5e493.firebaseapp.com",
+    projectId:"sales-monitor-5e493",
+    storageBucket:"sales-monitor-5e493.firebasestorage.app",
+    messagingSenderId:"480141946656",
+    appId:"1:480141946656:web:8ccf5e3ac266e94683b145"
+  });
+  const db=firebase.firestore();
+  async function fbLoad(k){try{const s=await db.collection("appdata").doc(k).get();return s.exists?s.data().value:null}catch(e){return null}}
+  async function fbSave(k,v){try{await db.collection("appdata").doc(k).set({value:v})}catch(e){console.error(e)}}
+  function fbListen(k,cb){return db.collection("appdata").doc(k).onSnapshot(s=>{if(s.exists)cb(s.data().value)})}
+  window._fb={fbLoad,fbSave,fbListen};
+  window._fbReady=true;
+  window.dispatchEvent(new Event("fbready"));
+</script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f5;min-height:100vh}
+input,select,textarea,button{font-family:inherit;outline:none}
+::-webkit-scrollbar{width:4px}::-webkit-scrollbar-thumb{background:#ccc;border-radius:4px}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const{useState,useEffect,useCallback,useRef}=React;
+const USER_COLORS=["#1d9e75","#d85a30","#7f77dd","#ba7517","#185fa5","#a32d2d","#3b6d11","#993556"];
+const DEFAULT_SKUS=[{id:1,name:"Lechon Manok",price:280},{id:2,name:"Liempo",price:320},{id:3,name:"Sisig",price:180}];
+const DEFAULT_USERS=[{id:1,name:"Admin",role:"admin",pin:"1234"}];
+const TABS_ADMIN=["Dashboard","Entry","Outlets","SKUs","Users","Quotas","Profile"];
+const TABS_USER=["Dashboard","Entry","Profile"];
+const ICONS_ADMIN=["ti-chart-bar","ti-plus","ti-building-store","ti-tag","ti-users","ti-target","ti-user-circle"];
+const ICONS_USER=["ti-chart-bar","ti-plus","ti-user-circle"];
+const TAB_COLORS=["#1d9e75","#d85a30","#7f77dd","#ba7517","#185fa5","#b45309","#7c3aed"];
+
+function today(){return new Date().toISOString().slice(0,10)}
+function fmt(n){return"₱"+Number(n).toLocaleString("en-PH",{minimumFractionDigits:0,maximumFractionDigits:0})}
+function getSummary(sales,skus,outletId){
+  const rows=sales.filter(s=>!outletId||s.outletId===outletId);
+  let qty=0,rev=0;
+  rows.forEach(s=>{const sku=skus.find(k=>k.id===s.skuId);if(!sku)return;qty+=s.qty;rev+=s.qty*sku.price});
+  return{qty,rev}
+}
+function Avatar({name,color,size=32}){
+  return<span style={{width:size,height:size,borderRadius:"50%",background:color,display:"flex",alignItems:"center",justifyContent:"center",fontSize:size*0.38,fontWeight:500,color:"#fff",flexShrink:0}}>{name.slice(0,2).toUpperCase()}</span>
+}
+function exportToExcel(sales,skus,outlets,expenses,dateFilter){
+  const rows=[["Date","Outlet","SKU","Qty","Price","Revenue","Entered By"]];
+  sales.filter(s=>!dateFilter||s.date===dateFilter).forEach(s=>{
+    const sku=skus.find(k=>k.id===s.skuId);const outlet=outlets.find(o=>o.id===s.outletId);
+    rows.push([s.date,outlet?.name||"",sku?.name||"",s.qty,sku?.price||0,s.qty*(sku?.price||0),s.enteredBy||""]);
+  });
+  rows.push([]);
+  rows.push(["Date","Outlet","Description","Amount","Notes","Entered By"]);
+  expenses.filter(e=>!dateFilter||e.date===dateFilter).forEach(e=>{
+    const outlet=outlets.find(o=>o.id===e.outletId);
+    rows.push([e.date,outlet?.name||"",e.description,e.amount,e.notes||"",e.enteredBy||""]);
+  });
+  const csv=rows.map(r=>r.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(",")).join("\n");
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));
+  a.download=`sales_report_${dateFilter||"all"}.csv`;a.click();
+}
+
+function App(){
+  const[outlets,setOutlets]=useState([]);
+  const[skus,setSkus]=useState([]);
+  const[sales,setSales]=useState([]);
+  const[expenses,setExpenses]=useState([]);
+  const[users,setUsers]=useState([]);
+  const[quotas,setQuotas]=useState({});
+  const[activeUser,setActiveUser]=useState(null);
+  const[tab,setTab]=useState(0);
+  const[loaded,setLoaded]=useState(false);
+  const[syncing,setSyncing]=useState(false);
+  const fb=useRef(null);
+
+  useEffect(()=>{
+    function init(){
+      fb.current=window._fb;
+      const{fbLoad,fbListen}=fb.current;
+      Promise.all([fbLoad("outlets"),fbLoad("skus"),fbLoad("sales"),fbLoad("users"),fbLoad("expenses"),fbLoad("quotas")]).then(([o,s,sa,u,ex,q])=>{
+        setOutlets(o||[{id:1,name:"Main Branch"},{id:2,name:"Branch 2"}]);
+        setSkus(s||DEFAULT_SKUS);setSales(sa||[]);setUsers(u||DEFAULT_USERS);setExpenses(ex||[]);setQuotas(q||{});
+        setLoaded(true);
+      });
+      fbListen("outlets",v=>setOutlets(v));fbListen("skus",v=>setSkus(v));fbListen("sales",v=>setSales(v));
+      fbListen("users",v=>setUsers(v));fbListen("expenses",v=>setExpenses(v));fbListen("quotas",v=>{if(v)setQuotas(v)});
+    }
+    if(window._fbReady)init();else window.addEventListener("fbready",init,{once:true});
+  },[]);
+
+  const mk=useCallback((key,setter)=>async v=>{setter(v);setSyncing(true);await fb.current.fbSave(key,v);setSyncing(false)},[]);
+  const saveOutlets=mk("outlets",setOutlets);
+  const saveSkus=mk("skus",setSkus);
+  const saveSales=mk("sales",setSales);
+  const saveUsers=mk("users",setUsers);
+  const saveExpenses=mk("expenses",setExpenses);
+  const saveQuotas=mk("quotas",setQuotas);
+
+  if(!loaded)return<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"100vh",gap:12}}>
+    <div style={{width:56,height:56,borderRadius:16,background:"linear-gradient(135deg,#1d9e75,#185fa5)",display:"flex",alignItems:"center",justifyContent:"center"}}><i className="ti ti-chart-dots" style={{fontSize:28,color:"#fff"}}/></div>
+    <div style={{fontSize:14,color:"#6b7280"}}>Connecting to database...</div>
+  </div>;
+  if(!activeUser)return<UserSelect users={users} saveUsers={saveUsers} onSelect={setActiveUser}/>;
+
+  const isAdmin=activeUser.role==="admin";
+  const TABS=isAdmin?TABS_ADMIN:TABS_USER;
+  const ICONS=isAdmin?ICONS_ADMIN:ICONS_USER;
+  const userColor=USER_COLORS[users.findIndex(u=>u.id===activeUser.id)%USER_COLORS.length]||"#1d9e75";
+  const safeTab=Math.min(tab,TABS.length-1);
+  const staffOutlets=isAdmin?outlets:outlets.filter(o=>sales.some(s=>s.outletId===o.id&&s.enteredBy===activeUser.name));
+
+  const pages=isAdmin?[
+    <Dashboard key="d" outlets={outlets} skus={skus} sales={sales} saveSales={saveSales} expenses={expenses} saveExpenses={saveExpenses} quotas={quotas} allOutlets={outlets}/>,
+    <Entry key="e" outlets={outlets} skus={skus} sales={sales} saveSales={saveSales} activeUser={activeUser} expenses={expenses} saveExpenses={saveExpenses} users={users}/>,
+    <Outlets key="o" outlets={outlets} saveOutlets={saveOutlets} saveSales={saveSales} sales={sales}/>,
+    <SKUs key="s" skus={skus} saveSkus={saveSkus} saveSales={saveSales} sales={sales}/>,
+    <UsersAdmin key="u" users={users} saveUsers={saveUsers}/>,
+    <QuotaManager key="q" outlets={outlets} quotas={quotas} saveQuotas={saveQuotas}/>,
+    <StoreProfile key="p" outlets={outlets} skus={skus} sales={sales} expenses={expenses} activeUser={activeUser} isAdmin={true} sales_all={sales} expenses_all={expenses} exportToExcel={exportToExcel}/>,
+  ]:[
+    <Dashboard key="d" outlets={staffOutlets} skus={skus} sales={sales} saveSales={saveSales} expenses={expenses} saveExpenses={saveExpenses} quotas={quotas} allOutlets={outlets}/>,
+    <Entry key="e" outlets={outlets} skus={skus} sales={sales} saveSales={saveSales} activeUser={activeUser} expenses={expenses} saveExpenses={saveExpenses} users={users}/>,
+    <StoreProfile key="p" outlets={staffOutlets} skus={skus} sales={sales} expenses={expenses} activeUser={activeUser} isAdmin={false} sales_all={sales} expenses_all={expenses} exportToExcel={exportToExcel}/>,
+  ];
+
+  return(
+    <div style={{maxWidth:420,margin:"0 auto",paddingBottom:72,minHeight:"100vh",background:"#fff"}}>
+      <div style={{padding:"14px 16px 10px",borderBottom:"0.5px solid #e5e7eb",display:"flex",alignItems:"center",gap:10,background:"#fff",position:"sticky",top:0,zIndex:5}}>
+        <i className="ti ti-chart-dots" style={{fontSize:20,color:"#2563eb"}}/>
+        <div style={{flex:1}}>
+          <div style={{fontSize:15,fontWeight:600,color:"#111827",lineHeight:1.2}}>Sales Monitor</div>
+          <div style={{display:"flex",alignItems:"center",gap:5}}>
+            <div style={{width:6,height:6,borderRadius:"50%",background:syncing?"#f59e0b":"#10b981"}}/>
+            <div style={{fontSize:11,color:"#6b7280"}}>{syncing?"Syncing...":"Live · "+outlets.length+" branches"}</div>
+          </div>
+        </div>
+        <button onClick={()=>{setActiveUser(null);setTab(0)}} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",borderRadius:8,border:`1px solid ${userColor}`,background:"none",cursor:"pointer"}}>
+          <Avatar name={activeUser.name} color={userColor} size={24}/>
+          <span style={{fontSize:12,color:userColor,fontWeight:500}}>{activeUser.name}</span>
+          {isAdmin&&<span style={{fontSize:10,background:userColor,color:"#fff",borderRadius:4,padding:"1px 5px"}}>Admin</span>}
+        </button>
+      </div>
+      <div style={{padding:"0 12px"}}>{pages[safeTab]}</div>
+      <nav style={{position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",width:"100%",maxWidth:420,background:"#3b1f0e",borderTop:"0.5px solid #5c3317",display:"flex",zIndex:10}}>
+        {TABS.map((t,i)=>{
+          const active=safeTab===i,color=TAB_COLORS[i];
+          return<button key={t} onClick={()=>setTab(i)} style={{flex:1,padding:"10px 0 8px",background:"none",border:"none",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:2,color:active?color:"#c8a882",position:"relative"}}>
+            {active&&<span style={{position:"absolute",top:0,left:"20%",right:"20%",height:3,borderRadius:"0 0 3px 3px",background:color}}/>}
+            <i className={`ti ${ICONS[i]}`} style={{fontSize:18}}/>
+            <span style={{fontSize:9}}>{t}</span>
+          </button>;
+        })}
+      </nav>
+    </div>
+  );
+}
+
+function UserSelect({users,saveUsers,onSelect}){
+  const[step,setStep]=useState("login");
+  const[selected,setSelected]=useState(null);
+  const[pin,setPin]=useState("");
+  const[error,setError]=useState("");
+  const[showList,setShowList]=useState(false);
+  const[form,setForm]=useState({name:"",role:"staff",pin:"",pin2:""});
+  const[formErr,setFormErr]=useState("");
+
+  function attemptLogin(u){if(u.pin){setSelected(u);setPin("");setError("");setStep("pin");setShowList(false)}else onSelect(u)}
+  function pressKey(k){
+    if(k==="⌫"){setPin(p=>p.slice(0,-1));setError("")}
+    else if(pin.length<4){const next=pin+k;setPin(next);if(next.length===4){setTimeout(()=>{if(next===selected.pin)onSelect(selected);else{setError("Wrong PIN. Try again.");setPin("")}},120)}}
+  }
+
+  if(step==="pin"){
+    const color=USER_COLORS[users.findIndex(u=>u.id===selected.id)%USER_COLORS.length]||"#1d9e75";
+    return<div style={{minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"24px 20px",background:"#fff",maxWidth:420,margin:"0 auto"}}>
+      <button onClick={()=>{setStep("login");setError("")}} style={{position:"absolute",top:20,left:20,background:"none",border:"none",color:"#6b7280",cursor:"pointer",display:"flex",alignItems:"center",gap:4,fontSize:13}}><i className="ti ti-arrow-left" style={{fontSize:16}}/> Back</button>
+      <div style={{textAlign:"center",marginBottom:28}}>
+        <Avatar name={selected.name} color={color} size={64}/>
+        <div style={{fontSize:17,fontWeight:600,color:"#111827",marginTop:12}}>{selected.name}</div>
+        <div style={{fontSize:12,color:"#6b7280",marginTop:3}}>{selected.role==="admin"?"Administrator":"Staff"}</div>
+      </div>
+      <div style={{fontSize:13,color:"#6b7280",marginBottom:14}}>Enter your 4-digit PIN</div>
+      <div style={{display:"flex",justifyContent:"center",gap:14,marginBottom:6}}>{[0,1,2,3].map(i=><div key={i} style={{width:16,height:16,borderRadius:"50%",transition:"background 0.15s",background:pin.length>i?color:"#f3f4f6",border:`1.5px solid ${pin.length>i?color:"#e5e7eb"}`}}/>)}</div>
+      <div style={{height:22,fontSize:12,color:"#dc2626",textAlign:"center",marginBottom:6}}>{error}</div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12,width:"100%",maxWidth:260}}>
+        {[1,2,3,4,5,6,7,8,9,"",0,"⌫"].map((k,i)=><button key={i} onClick={()=>k!==""&&pressKey(String(k))} style={{padding:"16px 0",borderRadius:12,border:k===""?"none":"0.5px solid #e5e7eb",background:k===""?"transparent":"#f3f4f6",color:"#111827",fontSize:20,fontWeight:500,cursor:k===""?"default":"pointer"}}>{k}</button>)}
+      </div>
+    </div>;
+  }
+
+  const inp={width:"100%",fontSize:14,padding:"9px 12px",borderRadius:10,border:"0.5px solid #e5e7eb",background:"#f3f4f6",color:"#111827",boxSizing:"border-box"};
+  return<div style={{minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"32px 20px",background:"#fff",maxWidth:420,margin:"0 auto",position:"relative"}}>
+    <div style={{textAlign:"center",marginBottom:28}}>
+      <img src="https://i.ibb.co/GfDfB7tW/logo.png" onError={e=>{e.target.style.display="none";document.getElementById("lb-fallback").style.display="flex"}} style={{width:140,height:140,objectFit:"contain",margin:"0 auto 10px",display:"block"}} alt="Lembest Logo"/>
+      <div id="lb-fallback" style={{width:140,height:140,borderRadius:"50%",background:"linear-gradient(135deg,#f59e0b,#dc2626)",display:"none",alignItems:"center",justifyContent:"center",margin:"0 auto 10px",border:"4px solid #fbbf24"}}>
+        <div style={{textAlign:"center"}}><div style={{fontSize:22,fontWeight:900,color:"#fff"}}>LEMBEST</div><div style={{fontSize:9,color:"#fef3c7",letterSpacing:2,marginTop:2}}>MANOK·LIEMPO·SISIG</div></div>
+      </div>
+      <div style={{fontSize:22,fontWeight:800,color:"#111827"}}>LEMBEST</div>
+      <div style={{fontSize:12,color:"#6b7280",marginTop:2,letterSpacing:1}}>MANOK · LIEMPO · SISIG</div>
+      <div style={{fontSize:11,color:"#9ca3af",marginTop:6}}>Sales Monitoring System</div>
+    </div>
+    {!showList?(
+      <div style={{width:"100%",maxWidth:320}}>
+        <button onClick={()=>setShowList(true)} style={{width:"100%",padding:"13px 0",borderRadius:12,border:"none",background:"linear-gradient(135deg,#1d9e75,#185fa5)",color:"#fff",fontSize:15,fontWeight:600,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:8}}><i className="ti ti-login" style={{fontSize:18}}/> Sign In</button>
+        <div style={{textAlign:"center",fontSize:12,color:"#6b7280",marginTop:14}}>{users.length} account{users.length!==1?"s":""} available</div>
+      </div>
+    ):(
+      <div style={{width:"100%",maxWidth:320}}>
+        <div style={{fontSize:13,fontWeight:500,color:"#6b7280",marginBottom:12,textAlign:"center"}}>Select your account</div>
+        <div style={{display:"flex",flexDirection:"column",gap:10,marginBottom:16}}>
+          {users.map((u,i)=>{const color=USER_COLORS[i%USER_COLORS.length];return(
+            <button key={u.id} onClick={()=>attemptLogin(u)} style={{display:"flex",alignItems:"center",gap:12,padding:"12px 16px",borderRadius:12,border:`1.5px solid ${color}33`,background:"#f9fafb",cursor:"pointer",textAlign:"left"}}>
+              <Avatar name={u.name} color={color} size={40}/>
+              <div style={{flex:1}}>
+                <div style={{fontSize:14,fontWeight:600,color:"#111827"}}>{u.name}</div>
+                <div style={{fontSize:11,color:"#6b7280",marginTop:2,display:"flex",gap:5}}>
+                  <span style={{padding:"1px 7px",borderRadius:4,background:u.role==="admin"?"#d1fae5":"#f3f4f6",color:u.role==="admin"?"#059669":"#6b7280",fontWeight:500}}>{u.role==="admin"?"Admin":"Staff"}</span>
+                  {u.pin&&<span><i className="ti ti-lock" style={{fontSize:10,marginRight:2}}/>PIN</span>}
+                </div>
+              </div>
+              <i className="ti ti-chevron-right" style={{fontSize:16,color:"#6b7280"}}/>
+            </button>
+          );})}
+        </div>
+        <button onClick={()=>setShowList(false)} style={{width:"100%",padding:"9px",borderRadius:10,border:"0.5px solid #e5e7eb",background:"none",color:"#6b7280",cursor:"pointer",fontSize:13}}>Cancel</button>
+      </div>
+    )}
+    <div style={{position:"absolute",bottom:20,fontSize:11,color:"#9ca3af"}}>Sales Monitor v1.0 · Firebase Live</div>
+  </div>;
+}
+
+function Dashboard({outlets,skus,sales,saveSales,expenses,saveExpenses,quotas,allOutlets}){
+  const[dateFilter,setDateFilter]=useState(today());
+  const[editingSale,setEditingSale]=useState(null);
+  const[editSaleForm,setEditSaleForm]=useState({});
+  const[editingExp,setEditingExp]=useState(null);
+  const[editExpForm,setEditExpForm]=useState({});
+  const[openOutlets,setOpenOutlets]=useState({});
+
+  const filtered=sales.filter(s=>s.date===dateFilter);
+  const filteredExp=expenses.filter(e=>e.date===dateFilter);
+  const total=getSummary(filtered,skus,null);
+  const totalExpenses=filteredExp.reduce((s,e)=>s+Number(e.amount),0);
+  const isToday=dateFilter===today();
+  const sorted=[...outlets].sort((a,b)=>getSummary(filtered,skus,b.id).rev-getSummary(filtered,skus,a.id).rev);
+
+  function saveSaleEdit(){saveSales(sales.map(s=>s.id===editingSale?{...s,skuId:Number(editSaleForm.skuId),qty:Number(editSaleForm.qty)}:s));setEditingSale(null)}
+  function deleteSale(id){saveSales(sales.filter(s=>s.id!==id))}
+  function saveExpEdit(){saveExpenses(expenses.map(e=>e.id===editingExp?{...e,description:editExpForm.description,amount:Number(editExpForm.amount),notes:editExpForm.notes}:e));setEditingExp(null)}
+  function deleteExp(id){saveExpenses(expenses.filter(e=>e.id!==id))}
+
+  const sel={width:"100%",marginBottom:6,fontSize:12,padding:"5px 8px",borderRadius:8,border:"0.5px solid #e5e7eb",background:"#fff",color:"#111827",boxSizing:"border-box"};
+  const btnBlue={padding:"4px 10px",border:"none",borderRadius:4,background:"#2563eb",color:"#fff",cursor:"pointer",fontSize:12,fontWeight:600};
+  const btnRed={padding:"4px 10px",border:"none",borderRadius:4,background:"#dc2626",color:"#fff",cursor:"pointer",fontSize:12,fontWeight:600};
+
+  return<div style={{padding:"12px 0"}}>
+    <input type="date" value={dateFilter} onChange={e=>setDateFilter(e.target.value)} style={{width:"100%",marginBottom:12,fontSize:13,padding:"7px 10px",borderRadius:8,border:"0.5px solid #e5e7eb",background:"#f3f4f6",color:"#111827",boxSizing:"border-box"}}/>
+
+    {/* Revenue hero */}
+    <div style={{background:"linear-gradient(135deg,#1d9e75,#185fa5)",borderRadius:14,padding:"14px 18px",marginBottom:10}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom: totalExpenses>0?8:0}}>
+        <div>
+          <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}><i className="ti ti-cash" style={{fontSize:15,color:"rgba(255,255,255,0.8)}"}}/><span style={{fontSize:12,color:"rgba(255,255,255,0.85)",fontWeight:500,letterSpacing:0.5}}>TOTAL REVENUE</span></div>
+          <div style={{fontSize:30,fontWeight:700,color:"#fff"}}>{fmt(total.rev)}</div>
+        </div>
+        <div style={{textAlign:"right"}}><div style={{fontSize:11,color:"rgba(255,255,255,0.7)",marginBottom:4}}>Units Sold</div><div style={{fontSize:22,fontWeight:700,color:"#fff"}}>{total.qty}</div><div style={{fontSize:10,color:"rgba(255,255,255,0.6)",marginTop:2}}>{outlets.length} outlets</div></div>
+      </div>
+      {totalExpenses>0&&<>
+        <div style={{borderTop:"0.5px solid rgba(255,255,255,0.25)",paddingTop:8,display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+          <span style={{fontSize:12,color:"rgba(255,255,255,0.8)"}}>- Expenses</span>
+          <span style={{fontSize:14,fontWeight:600,color:"#fca5a5"}}>{fmt(totalExpenses)}</span>
+        </div>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <span style={{fontSize:13,fontWeight:700,color:"rgba(255,255,255,0.9)"}}>Net Sales</span>
+          <span style={{fontSize:20,fontWeight:800,color:"#fff"}}>{fmt(total.rev-totalExpenses)}</span>
+        </div>
+      </>}
+    </div>
+
+    <div style={{fontSize:13,fontWeight:600,color:"#111827",marginBottom:8}}>Per Outlet Detail</div>
+    {sorted.map(o=>{
+      const s=getSummary(filtered,skus,o.id);
+      const hasSales=s.qty>0;
+      const skuBreak=skus.map(sku=>{const rows=filtered.filter(r=>r.outletId===o.id&&r.skuId===sku.id);const qty=rows.reduce((a,r)=>a+r.qty,0);return qty>0?{sku,qty,rev:qty*sku.price,saleIds:rows.map(r=>r.id)}:null}).filter(Boolean);
+      const outletExp=filteredExp.filter(e=>e.outletId===o.id);
+      const isOpen=openOutlets[o.id]!==false;
+      const quota=quotas[o.id]||0;
+      const hitQuota=quota>0&&s.rev>=quota;
+      const missedQuota=quota>0&&s.rev<quota;
+      const borderColor=!hasSales?"#d1d5db":hitQuota?"#16a34a":missedQuota?"#dc2626":"#e5e7eb";
+      const bgColor=!hasSales?"#f9fafb":hitQuota?"#f0fdf4":missedQuota?"#fef2f2":"#fff";
+      return<div key={o.id} style={{background:bgColor,border:`1.5px solid ${borderColor}`,borderRadius:12,marginBottom:10,overflow:"hidden",opacity:hasSales?1:0.65}}>
+        <button onPointerDown={()=>setOpenOutlets(p=>({...p,[o.id]:!isOpen}))} style={{width:"100%",display:"flex",justifyContent:"space-between",alignItems:"center",padding:"12px 14px",background:"none",border:"none",cursor:"pointer",textAlign:"left"}}>
+          <div style={{flex:1}}>
+            <div style={{display:"flex",alignItems:"center",gap:6}}>
+              <div style={{fontSize:14,fontWeight:600,color:hasSales?"#111827":"#9ca3af"}}>{o.name}</div>
+              {!hasSales&&<span style={{fontSize:10,background:"#e5e7eb",color:"#6b7280",borderRadius:4,padding:"1px 6px"}}>No Sales</span>}
+            </div>
+            <div style={{fontSize:11,color:hasSales?"#6b7280":"#9ca3af",marginTop:2}}>{hasSales?`${s.qty} units · ${fmt(s.rev)}`:"No sales recorded"}</div>
+            {quota>0&&hasSales&&<div style={{marginTop:4}}>
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:10,marginBottom:2}}>
+                <span style={{color:hitQuota?"#16a34a":"#dc2626",fontWeight:600}}>{hitQuota?"✔ QUOTA HIT":"✘ BELOW QUOTA"} · {fmt(s.rev)} / {fmt(quota)}</span>
+                <span style={{color:"#6b7280"}}>{Math.min(100,Math.round(s.rev/quota*100))}%</span>
+              </div>
+              <div style={{height:6,borderRadius:99,background:"#e5e7eb",overflow:"hidden"}}><div style={{height:"100%",borderRadius:99,width:`${Math.min(100,s.rev/quota*100)}%`,background:hitQuota?"#16a34a":"#dc2626",transition:"width 0.4s"}}/></div>
+            </div>}
+          </div>
+          <i className={`ti ti-chevron-${isOpen?"up":"down"}`} style={{fontSize:16,color:"#6b7280",marginLeft:8}}/>
+        </button>
+        {isOpen&&hasSales&&<div style={{padding:"0 14px 12px"}}>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:6,marginBottom:10}}>
+            {[["Revenue",fmt(s.rev)],["Units",s.qty]].map(([l,v])=><div key={l} style={{background:"rgba(255,255,255,0.7)",borderRadius:8,padding:"6px 8px"}}><div style={{fontSize:10,color:"#6b7280"}}>{l}</div><div style={{fontSize:12,fontWeight:500,color:"#111827"}}>{v}</div></div>)}
+          </div>
+          {skuBreak.length>0&&<div style={{borderTop:"0.5px solid #e5e7eb",paddingTop:8}}>
+            <div style={{fontSize:11,fontWeight:600,color:"#6b7280",marginBottom:6,letterSpacing:0.4}}>SALES</div>
+            {skuBreak.map(({sku,qty,rev,saleIds})=><div key={sku.id}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"4px 0",fontSize:12}}><span style={{color:"#6b7280"}}>{sku.name}</span><span style={{color:"#111827"}}>{qty}× &nbsp;{fmt(rev)}</span></div>
+              {saleIds.map(sid=>{
+                const sale=filtered.find(s=>s.id===sid);if(!sale)return null;
+                return editingSale===sid?(
+                  <div key={sid} style={{background:"#f3f4f6",borderRadius:8,padding:"8px 10px",marginBottom:6,position:"relative",zIndex:10}}>
+                    <div style={{fontSize:11,color:"#6b7280",marginBottom:4}}>Outlet: <strong>{allOutlets.find(o=>o.id===sale.outletId)?.name}</strong> <span style={{color:"#9ca3af"}}>(locked)</span></div>
+                    <select value={editSaleForm.skuId} onChange={e=>setEditSaleForm({...editSaleForm,skuId:e.target.value})} style={sel}>{skus.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select>
+                    <input type="number" min="1" value={editSaleForm.qty} onChange={e=>setEditSaleForm({...editSaleForm,qty:e.target.value})} style={{...sel,marginBottom:8}}/>
+                    <div style={{display:"flex",gap:6}}>
+                      <button onPointerDown={e=>{e.stopPropagation();saveSaleEdit()}} style={{flex:1,padding:"8px",borderRadius:8,border:"none",background:"#2563eb",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600}}>Save</button>
+                      <button onPointerDown={e=>{e.stopPropagation();setEditingSale(null)}} style={{flex:1,padding:"8px",borderRadius:8,border:"0.5px solid #e5e7eb",background:"none",color:"#6b7280",cursor:"pointer",fontSize:13}}>Cancel</button>
+                    </div>
+                  </div>
+                ):(
+                  <div key={sid} style={{display:"flex",alignItems:"center",justifyContent:"flex-end",gap:6,marginBottom:4}}>
+                    <span style={{fontSize:11,color:"#6b7280"}}>{sale.enteredBy||"—"} · qty {sale.qty}</span>
+                    {isToday?(
+                      <>
+                        <button onPointerDown={e=>{e.stopPropagation();setEditingSale(sid);setEditSaleForm({skuId:sale.skuId,qty:sale.qty})}} style={btnBlue}>Edit</button>
+                        <button onPointerDown={e=>{e.stopPropagation();deleteSale(sid)}} style={btnRed}>Delete</button>
+                      </>
+                    ):<span style={{fontSize:10,background:"#f3f4f6",color:"#9ca3af",borderRadius:4,padding:"2px 8px"}}>🔒 Locked</span>}
+                  </div>
+                );
+              })}
+            </div>)}
+          </div>}
+          {outletExp.length>0&&<div style={{borderTop:"0.5px solid #e5e7eb",paddingTop:8,marginTop:8}}>
+            <div style={{fontSize:11,fontWeight:600,color:"#dc2626",marginBottom:6,letterSpacing:0.4}}>EXPENSES</div>
+            {outletExp.map(ex=><div key={ex.id}>
+              {editingExp===ex.id?(
+                <div style={{background:"#f3f4f6",borderRadius:8,padding:"8px 10px",marginBottom:6,position:"relative",zIndex:10}}>
+                  <input value={editExpForm.description} onChange={e=>setEditExpForm({...editExpForm,description:e.target.value})} style={{...sel,marginBottom:6}} placeholder="Description"/>
+                  <input type="number" value={editExpForm.amount} onChange={e=>setEditExpForm({...editExpForm,amount:e.target.value})} style={{...sel,marginBottom:6}} placeholder="Amount"/>
+                  <textarea value={editExpForm.notes} onChange={e=>setEditExpForm({...editExpForm,notes:e.target.value})} rows={2} style={{...sel,resize:"vertical",marginBottom:8}} placeholder="Notes"/>
+                  <div style={{display:"flex",gap:6}}>
+                    <button onPointerDown={e=>{e.stopPropagation();saveExpEdit()}} style={{flex:1,padding:"8px",borderRadius:8,border:"none",background:"#2563eb",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600}}>Save</button>
+                    <button onPointerDown={e=>{e.stopPropagation();setEditingExp(null)}} style={{flex:1,padding:"8px",borderRadius:8,border:"0.5px solid #e5e7eb",background:"none",color:"#6b7280",cursor:"pointer",fontSize:13}}>Cancel</button>
+                  </div>
+                </div>
+              ):(
+                <div style={{display:"flex",alignItems:"flex-start",gap:6,marginBottom:6}}>
+                  <div style={{flex:1}}><div style={{fontSize:12,fontWeight:500,color:"#111827"}}>{ex.description}</div>{ex.notes&&<div style={{fontSize:11,color:"#6b7280"}}>{ex.notes}</div>}<div style={{fontSize:11,color:"#6b7280"}}>by {ex.enteredBy||"—"}</div></div>
+                  <span style={{fontSize:13,fontWeight:600,color:"#dc2626",marginRight:4}}>{fmt(ex.amount)}</span>
+                  {isToday?(
+                    <>
+                      <button onPointerDown={e=>{e.stopPropagation();setEditingExp(ex.id);setEditExpForm({description:ex.description,amount:ex.amount,notes:ex.notes||""})}} style={btnBlue}>Edit</button>
+                      <button onPointerDown={e=>{e.stopPropagation();deleteExp(ex.id)}} style={btnRed}>Delete</button>
+                    </>
+                  ):<span style={{fontSize:10,background:"#f3f4f6",color:"#9ca3af",borderRadius:4,padding:"2px 8px"}}>🔒 Locked</span>}
+                </div>
+              )}
+            </div>)}
+          </div>}
+        </div>}
+        {isOpen&&!hasSales&&<div style={{padding:"8px 14px 12px",fontSize:12,color:"#9ca3af"}}>No sales recorded for this date.</div>}
+      </div>;
+    })}
+  </div>;
+}
+
+function Entry({outlets,skus,sales,saveSales,activeUser,expenses,saveExpenses,users=[]}){
+  const[outletId,setOutletId]=useState("");
+  const[skuId,setSkuId]=useState("");
+  const[qty,setQty]=useState("");
+  const[cart,setCart]=useState([]);
+  const[editingId,setEditingId]=useState(null);
+  const[editRow,setEditRow]=useState({});
+  const[expDesc,setExpDesc]=useState("");
+  const[expAmount,setExpAmount]=useState("");
+  const[expNotes,setExpNotes]=useState("");
+  const[expCart,setExpCart]=useState([]);
+  const[editingExpId,setEditingExpId]=useState(null);
+  const[editExpRow,setEditExpRow]=useState({});
+  const[msg,setMsg]=useState("");
+  const[saving,setSaving]=useState(false);
+
+  function flash(m){setMsg(m);setTimeout(()=>setMsg(""),2500)}
+
+  function addToCart(){
+    if(!outletId){flash("Please select an outlet.");return}
+    if(!skuId){flash("Please select a SKU.");return}
+    if(!qty||Number(qty)<=0){flash("Please enter a valid quantity.");return}
+    const sku=skus.find(s=>s.id===Number(skuId));
+    const outlet=outlets.find(o=>o.id===Number(outletId));
+    setCart(p=>[...p,{tempId:Date.now()+Math.random(),outletId:Number(outletId),outletName:outlet?.name,skuId:Number(skuId),skuName:sku?.name,price:sku?.price,qty:Number(qty)}]);
+    setSkuId("");setQty("");
+  }
+
+  function addExpToCart(){
+    if(!outletId){flash("Please select an outlet first.");return}
+    if(!expDesc.trim()){flash("Enter expense description.");return}
+    if(!expAmount||Number(expAmount)<=0){flash("Enter a valid amount.");return}
+    const outlet=outlets.find(o=>o.id===Number(outletId));
+    setExpCart(p=>[...p,{tempId:Date.now()+Math.random(),outletId:Number(outletId),outletName:outlet?.name,description:expDesc.trim(),amount:Number(expAmount),notes:expNotes.trim()}]);
+    setExpDesc("");setExpAmount("");setExpNotes("");
+  }
+
+  const grandTotal=cart.reduce((s,c)=>s+c.qty*c.price,0);
+  const totalQty=cart.reduce((s,c)=>s+c.qty,0);
+  const expTotal=expCart.reduce((s,e)=>s+e.amount,0);
+  const netTotal=grandTotal-expTotal;
+
+  async function handleSave(){
+    if(cart.length===0&&expCart.length===0){flash("Add at least one entry.");return}
+    setSaving(true);
+    try{
+      if(cart.length>0){
+        const newSales=cart.map(c=>({id:Date.now()+Math.random(),outletId:c.outletId,skuId:c.skuId,qty:c.qty,date:today(),enteredBy:activeUser.name}));
+        await saveSales([...sales,...newSales]);
+      }
+      if(expCart.length>0){
+        const newExp=expCart.map(e=>({id:Date.now()+Math.random(),outletId:e.outletId,description:e.description,amount:e.amount,notes:e.notes||"",date:today(),enteredBy:activeUser.name}));
+        await saveExpenses([...expenses,...newExp]);
+      }
+      setCart([]);setExpCart([]);setOutletId("");setSkuId("");setQty("");
+      flash("Saved successfully!");
+    }catch(e){console.error(e);flash("Error saving. Try again.");}
+    finally{setSaving(false);}
+  }
+
+  const sel={width:"100%",fontSize:14,padding:"10px 12px",borderRadius:8,border:"0.5px solid #e5e7eb",background:"#f3f4f6",color:"#111827",boxSizing:"border-box"};
+  const label={fontSize:11,fontWeight:600,color:"#6b7280",letterSpacing:0.5,marginBottom:5,display:"block",textTransform:"uppercase"};
+
+  return<div style={{padding:"12px 0"}}>
+
+    {/* ── SALES SECTION ── */}
+    <div style={{background:"#fff",borderRadius:12,border:"0.5px solid #e5e7eb",overflow:"hidden",marginBottom:14}}>
+      {/* Header */}
+      <div style={{background:"#1d9e75",padding:"10px 16px",display:"flex",alignItems:"center",gap:8}}>
+        <i className="ti ti-receipt" style={{fontSize:16,color:"#fff"}}/>
+        <span style={{fontSize:14,fontWeight:700,color:"#fff",letterSpacing:0.5}}>SALES</span>
+      </div>
+
+      <div style={{padding:"14px 14px 4px"}}>
+        {/* Outlet */}
+        <div style={{marginBottom:12}}>
+          <label style={label}>Outlet</label>
+          <select value={outletId} onChange={e=>setOutletId(e.target.value)} style={sel}>
+            <option value="">Select your Outlet</option>
+            {outlets.map(o=><option key={o.id} value={o.id}>{o.name}</option>)}
+          </select>
+        </div>
+
+        {/* SKU */}
+        <div style={{marginBottom:12}}>
+          <label style={label}>Item / SKU</label>
+          <select value={skuId} onChange={e=>setSkuId(e.target.value)} style={sel}>
+            <option value="">Select your Item</option>
+            {skus.map(s=><option key={s.id} value={s.id}>{s.name} — {fmt(s.price)}</option>)}
+          </select>
+        </div>
+
+        {/* QTY */}
+        <div style={{marginBottom:14}}>
+          <label style={label}>QTY</label>
+          <input type="number" min="1" value={qty} onChange={e=>setQty(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addToCart()} placeholder="Enter quantity" style={sel}/>
+        </div>
+
+        {/* Divider */}
+        <div style={{borderTop:"0.5px solid #e5e7eb",marginBottom:14}}/>
+
+        {/* EXPENSES */}
+        <div style={{marginBottom:6}}>
+          <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:10}}>
+            <i className="ti ti-receipt-2" style={{fontSize:14,color:"#dc2626"}}/>
+            <span style={{fontSize:12,fontWeight:700,color:"#dc2626",letterSpacing:0.5,textTransform:"uppercase"}}>Expenses</span>
+            <span style={{fontSize:11,color:"#9ca3af"}}>(uses selected outlet above)</span>
+          </div>
+          <div style={{marginBottom:10}}>
+            <label style={label}>Description</label>
+            <input value={expDesc} onChange={e=>setExpDesc(e.target.value)} placeholder="e.g. Gas, Supplies, Repair" style={sel}/>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
+            <div>
+              <label style={label}>Amount (₱)</label>
+              <input type="number" min="1" value={expAmount} onChange={e=>setExpAmount(e.target.value)} placeholder="0" style={sel}/>
+            </div>
+            <div>
+              <label style={label}>Notes</label>
+              <input value={expNotes} onChange={e=>setExpNotes(e.target.value)} placeholder="Optional" style={sel}/>
+            </div>
+          </div>
+        </div>
+
+        {/* ADD ENTRY Button */}
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,paddingBottom:14}}>
+          <button onClick={addToCart} style={{padding:"11px",borderRadius:8,border:"none",background:"#1d9e75",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center",gap:6}}>
+            <i className="ti ti-plus" style={{fontSize:15}}/>Add Sale
+          </button>
+          <button onClick={addExpToCart} style={{padding:"11px",borderRadius:8,border:"none",background:"#dc2626",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center",gap:6}}>
+            <i className="ti ti-plus" style={{fontSize:15}}/>Add Expense
+          </button>
+        </div>
+      </div>
+    </div>
+
+    {/* Sales List */}
+    {cart.length>0&&<div style={{background:"#fff",border:"0.5px solid #d1fae5",borderRadius:12,overflow:"hidden",marginBottom:12}}>
+      <div style={{padding:"8px 14px",background:"#f0fdf4",borderBottom:"0.5px solid #d1fae5",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <span style={{fontSize:12,fontWeight:700,color:"#16a34a",letterSpacing:0.4}}>SALES LIST ({cart.length})</span>
+        <button onClick={()=>setCart([])} style={{fontSize:11,color:"#dc2626",background:"none",border:"none",cursor:"pointer"}}>Clear all</button>
+      </div>
+      {cart.map((c,i)=><div key={c.tempId} style={{borderBottom:i<cart.length-1?"0.5px solid #f3f4f6":"none"}}>
+        {editingId===c.tempId?(
+          <div style={{padding:"10px 14px",background:"#f9fafb"}}>
+            <select value={editRow.skuId} onChange={e=>{const s=skus.find(x=>x.id===Number(e.target.value));setEditRow({...editRow,skuId:Number(e.target.value),skuName:s?.name,price:s?.price})}} style={{...sel,marginBottom:8}}>{skus.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select>
+            <input type="number" min="1" value={editRow.qty} onChange={e=>setEditRow({...editRow,qty:Number(e.target.value)})} style={{...sel,marginBottom:10}}/>
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={()=>{setCart(p=>p.map(x=>x.tempId===c.tempId?{...x,...editRow}:x));setEditingId(null)}} style={{flex:1,padding:"7px",borderRadius:8,border:"none",background:"#16a34a",color:"#fff",cursor:"pointer",fontSize:13}}>Save</button>
+              <button onClick={()=>setEditingId(null)} style={{flex:1,padding:"7px",borderRadius:8,border:"0.5px solid #e5e7eb",background:"none",color:"#6b7280",cursor:"pointer",fontSize:13}}>Cancel</button>
+            </div>
+          </div>
+        ):(
+          <div style={{display:"flex",alignItems:"center",gap:8,padding:"9px 14px"}}>
+            <div style={{flex:1}}><div style={{fontSize:13,color:"#111827",fontWeight:600}}>{c.skuName}</div><div style={{fontSize:11,color:"#6b7280"}}>{c.outletName} · {c.qty} pcs</div></div>
+            <div style={{fontSize:13,fontWeight:700,color:"#1d9e75",marginRight:4}}>{fmt(c.qty*c.price)}</div>
+            <button onClick={()=>{setEditingId(c.tempId);setEditRow({skuId:c.skuId,skuName:c.skuName,price:c.price,qty:c.qty})}} style={{padding:"4px 8px",border:"none",borderRadius:4,background:"#2563eb",color:"#fff",cursor:"pointer",fontSize:11,fontWeight:600}}>Edit</button>
+            <button onClick={()=>setCart(p=>p.filter(x=>x.tempId!==c.tempId))} style={{padding:"4px 8px",border:"none",borderRadius:4,background:"#dc2626",color:"#fff",cursor:"pointer",fontSize:11,fontWeight:600}}>Del</button>
+          </div>
+        )}
+      </div>)}
+      <div style={{padding:"8px 14px",background:"#f0fdf4",borderTop:"0.5px solid #d1fae5",display:"flex",justifyContent:"space-between"}}>
+        <span style={{fontSize:13,fontWeight:600,color:"#111827"}}>Sales Total ({totalQty} units)</span>
+        <span style={{fontSize:14,fontWeight:700,color:"#1d9e75"}}>{fmt(grandTotal)}</span>
+      </div>
+    </div>}
+
+    {/* Expenses List */}
+    {expCart.length>0&&<div style={{background:"#fff",border:"0.5px solid #fca5a5",borderRadius:12,overflow:"hidden",marginBottom:12}}>
+      <div style={{padding:"8px 14px",background:"#fef2f2",borderBottom:"0.5px solid #fca5a5",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <span style={{fontSize:12,fontWeight:700,color:"#dc2626",letterSpacing:0.4}}>EXPENSES LIST ({expCart.length})</span>
+        <button onClick={()=>setExpCart([])} style={{fontSize:11,color:"#dc2626",background:"none",border:"none",cursor:"pointer"}}>Clear all</button>
+      </div>
+      {expCart.map((e,i)=><div key={e.tempId} style={{borderBottom:i<expCart.length-1?"0.5px solid #fee2e2":"none"}}>
+        {editingExpId===e.tempId?(
+          <div style={{padding:"10px 14px",background:"#f9fafb"}}>
+            <input value={editExpRow.description} onChange={ev=>setEditExpRow({...editExpRow,description:ev.target.value})} placeholder="Description" style={{...sel,marginBottom:8}}/>
+            <input type="number" value={editExpRow.amount} onChange={ev=>setEditExpRow({...editExpRow,amount:ev.target.value})} placeholder="Amount" style={{...sel,marginBottom:8}}/>
+            <input value={editExpRow.notes} onChange={ev=>setEditExpRow({...editExpRow,notes:ev.target.value})} placeholder="Notes" style={{...sel,marginBottom:8}}/>
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={()=>{setExpCart(p=>p.map(x=>x.tempId===e.tempId?{...x,...editExpRow}:x));setEditingExpId(null)}} style={{flex:1,padding:"7px",borderRadius:8,border:"none",background:"#2563eb",color:"#fff",cursor:"pointer",fontSize:13}}>Save</button>
+              <button onClick={()=>setEditingExpId(null)} style={{flex:1,padding:"7px",borderRadius:8,border:"0.5px solid #e5e7eb",background:"none",color:"#6b7280",cursor:"pointer",fontSize:13}}>Cancel</button>
+            </div>
+          </div>
+        ):(
+          <div style={{display:"flex",alignItems:"flex-start",gap:8,padding:"9px 14px"}}>
+            <div style={{flex:1}}><div style={{fontSize:13,fontWeight:600,color:"#111827"}}>{e.description}</div><div style={{fontSize:11,color:"#6b7280"}}>{e.outletName}{e.notes?` · ${e.notes}`:""}</div></div>
+            <span style={{fontSize:13,fontWeight:700,color:"#dc2626",marginRight:4}}>{fmt(e.amount)}</span>
+            <button onClick={()=>{setEditingExpId(e.tempId);setEditExpRow({description:e.description,amount:e.amount,notes:e.notes||""})}} style={{padding:"4px 8px",border:"none",borderRadius:4,background:"#2563eb",color:"#fff",cursor:"pointer",fontSize:11,fontWeight:600}}>Edit</button>
+            <button onClick={()=>setExpCart(p=>p.filter(x=>x.tempId!==e.tempId))} style={{padding:"4px 8px",border:"none",borderRadius:4,background:"#dc2626",color:"#fff",cursor:"pointer",fontSize:11,fontWeight:600}}>Del</button>
+          </div>
+        )}
+      </div>)}
+      <div style={{padding:"8px 14px",background:"#fef2f2",borderTop:"0.5px solid #fca5a5",display:"flex",justifyContent:"space-between"}}>
+        <span style={{fontSize:13,fontWeight:600,color:"#111827"}}>Expenses Total</span>
+        <span style={{fontSize:14,fontWeight:700,color:"#dc2626"}}>{fmt(expTotal)}</span>
+      </div>
+    </div>}
+
+    {/* Net Summary */}
+    {(cart.length>0||expCart.length>0)&&<div style={{background:"#111827",borderRadius:12,padding:"12px 16px",marginBottom:12}}>
+      {cart.length>0&&<div style={{display:"flex",justifyContent:"space-between",fontSize:13,marginBottom:4}}><span style={{color:"#9ca3af"}}>Sales</span><span style={{color:"#34d399",fontWeight:600}}>{fmt(grandTotal)}</span></div>}
+      {expCart.length>0&&<div style={{display:"flex",justifyContent:"space-between",fontSize:13,marginBottom:6}}><span style={{color:"#9ca3af"}}>Expenses</span><span style={{color:"#f87171",fontWeight:600}}>- {fmt(expTotal)}</span></div>}
+      <div style={{borderTop:"0.5px solid #374151",paddingTop:8,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <span style={{fontSize:14,fontWeight:700,color:"#fff"}}>Net Total</span>
+        <span style={{fontSize:22,fontWeight:800,color:netTotal>=0?"#34d399":"#f87171"}}>{fmt(netTotal)}</span>
+      </div>
+    </div>}
+
+    {/* Save */}
+    <button onClick={handleSave} disabled={saving||(cart.length===0&&expCart.length===0)} style={{width:"100%",padding:"14px",borderRadius:10,border:"none",background:(cart.length===0&&expCart.length===0)?"#e5e7eb":"linear-gradient(135deg,#1d9e75,#185fa5)",color:(cart.length===0&&expCart.length===0)?"#9ca3af":"#fff",cursor:(cart.length===0&&expCart.length===0)?"default":"pointer",fontSize:15,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
+      <i className="ti ti-device-floppy" style={{fontSize:18}}/>{saving?"Saving...":"Save All Entries"}
+    </button>
+
+    {msg&&<div style={{marginTop:10,fontSize:13,color:msg.includes("success")||msg.includes("!")?"#16a34a":"#dc2626",textAlign:"center",fontWeight:500}}>{msg}</div>}
+  </div>;
+}
+
+function StoreProfile({outlets,skus,sales,expenses,activeUser,isAdmin,sales_all,expenses_all,exportToExcel}){
+  const[selectedOutlet,setSelectedOutlet]=useState(outlets[0]?.id||"");
+  const[dateFilter,setDateFilter]=useState(today());
+  const[range,setRange]=useState("day");
+
+  function getDates(){
+    const d=new Date(dateFilter);
+    if(range==="day")return[dateFilter];
+    if(range==="week"){const dates=[];const start=new Date(d);start.setDate(d.getDate()-6);for(let i=new Date(start);i<=d;i.setDate(i.getDate()+1))dates.push(i.toISOString().slice(0,10));return dates;}
+    if(range==="month"){const dates=[];const start=new Date(d.getFullYear(),d.getMonth(),1);const end=new Date(d.getFullYear(),d.getMonth()+1,0);for(let i=new Date(start);i<=end;i.setDate(i.getDate()+1))dates.push(i.toISOString().slice(0,10));return dates;}
+    return[dateFilter];
+  }
+  const dates=getDates();
+  const outlet=outlets.find(o=>o.id===Number(selectedOutlet));
+  const chartData=dates.map(date=>{
+    const rev=sales.filter(s=>s.date===date&&s.outletId===Number(selectedOutlet)).reduce((sum,s)=>{const sku=skus.find(k=>k.id===s.skuId);return sum+(sku?s.qty*sku.price:0)},0);
+    return{date,rev,label:date.slice(5)};
+  });
+  const maxRev=Math.max(...chartData.map(d=>d.rev),1);
+  const totalRev=chartData.reduce((s,d)=>s+d.rev,0);
+  const totalQty=sales.filter(s=>dates.includes(s.date)&&s.outletId===Number(selectedOutlet)).reduce((s,x)=>s+x.qty,0);
+  const skuBreak=skus.map(sku=>{const qty=sales.filter(s=>dates.includes(s.date)&&s.outletId===Number(selectedOutlet)&&s.skuId===sku.id).reduce((a,r)=>a+r.qty,0);return qty>0?{sku,qty,rev:qty*sku.price}:null}).filter(Boolean).sort((a,b)=>b.rev-a.rev);
+
+  return<div style={{padding:"12px 0"}}>
+    <select value={selectedOutlet} onChange={e=>setSelectedOutlet(e.target.value)} style={{width:"100%",fontSize:13,padding:"8px 10px",borderRadius:8,border:"0.5px solid #e5e7eb",background:"#f3f4f6",color:"#111827",marginBottom:10}}>
+      {outlets.map(o=><option key={o.id} value={o.id}>{o.name}</option>)}
+    </select>
+    <div style={{display:"flex",gap:6,marginBottom:12}}>
+      {[["day","Day"],["week","7 Days"],["month","Month"]].map(([v,l])=>(
+        <button key={v} onClick={()=>setRange(v)} style={{flex:1,padding:"7px",borderRadius:8,border:"0.5px solid #e5e7eb",background:range===v?"#1d9e75":"#f3f4f6",color:range===v?"#fff":"#6b7280",cursor:"pointer",fontSize:12,fontWeight:range===v?600:400}}>{l}</button>
+      ))}
+      <input type="date" value={dateFilter} onChange={e=>setDateFilter(e.target.value)} style={{flex:1.5,fontSize:11,padding:"7px 6px",borderRadius:8,border:"0.5px solid #e5e7eb",background:"#f3f4f6",color:"#111827"}}/>
+    </div>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:14}}>
+      {[["Revenue",fmt(totalRev),"#1d9e75"],["Units",totalQty,"#185fa5"]].map(([l,v,c])=>(
+        <div key={l} style={{background:`${c}11`,border:`0.5px solid ${c}33`,borderRadius:10,padding:"10px 12px"}}>
+          <div style={{fontSize:11,color:"#6b7280"}}>{l}</div>
+          <div style={{fontSize:18,fontWeight:700,color:c}}>{v}</div>
+        </div>
+      ))}
+    </div>
+    <div style={{background:"#f9fafb",borderRadius:12,padding:"14px 10px",marginBottom:14,border:"0.5px solid #e5e7eb"}}>
+      <div style={{fontSize:12,fontWeight:600,color:"#111827",marginBottom:10}}>Daily Revenue — {outlet?.name}</div>
+      <div style={{display:"flex",alignItems:"flex-end",gap:range==="month"?2:4,height:120,overflowX:"auto"}}>
+        {chartData.map((d,i)=>{
+          const h=maxRev>0?Math.max(4,Math.round(d.rev/maxRev*100)):4;
+          return<div key={i} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:2,flex:"0 0 auto",minWidth:range==="month"?18:28}}>
+            <div style={{fontSize:9,color:"#6b7280",whiteSpace:"nowrap"}}>{d.rev>0?fmt(d.rev).replace("₱",""):""}</div>
+            <div style={{width:"100%",height:`${h}%`,minHeight:4,background:d.rev>0?"linear-gradient(180deg,#1d9e75,#185fa5)":"#e5e7eb",borderRadius:"4px 4px 0 0",transition:"height 0.3s"}}/>
+            <div style={{fontSize:9,color:"#6b7280",whiteSpace:"nowrap"}}>{d.label}</div>
+          </div>;
+        })}
+      </div>
+    </div>
+    {skuBreak.length>0&&<div style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:12,overflow:"hidden",marginBottom:14}}>
+      <div style={{padding:"10px 14px",borderBottom:"0.5px solid #e5e7eb",fontSize:12,fontWeight:600,color:"#111827"}}>SKU Breakdown</div>
+      {skuBreak.map(({sku,qty,rev})=>(
+        <div key={sku.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"9px 14px",borderBottom:"0.5px solid #f3f4f6"}}>
+          <span style={{fontSize:13,color:"#111827"}}>{sku.name}</span>
+          <div style={{textAlign:"right"}}><div style={{fontSize:13,fontWeight:600,color:"#1d9e75"}}>{fmt(rev)}</div><div style={{fontSize:11,color:"#6b7280"}}>{qty} pcs</div></div>
+        </div>
+      ))}
+    </div>}
+    {isAdmin&&<div style={{background:"#f9fafb",border:"0.5px solid #e5e7eb",borderRadius:12,padding:"12px 14px"}}>
+      <div style={{fontSize:13,fontWeight:600,color:"#111827",marginBottom:8}}>Export to Excel (CSV)</div>
+      <div style={{display:"flex",gap:8}}>
+        <button onClick={()=>exportToExcel(sales_all,skus,outlets,expenses_all,dateFilter)} style={{flex:1,padding:"9px",borderRadius:8,border:"none",background:"#16a34a",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600,display:"flex",alignItems:"center",justifyContent:"center",gap:6}}><i className="ti ti-file-spreadsheet" style={{fontSize:15}}/> Today</button>
+        <button onClick={()=>exportToExcel(sales_all,skus,outlets,expenses_all,null)} style={{flex:1,padding:"9px",borderRadius:8,border:"none",background:"#2563eb",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600,display:"flex",alignItems:"center",justifyContent:"center",gap:6}}><i className="ti ti-database-export" style={{fontSize:15}}/> All Data</button>
+      </div>
+    </div>}
+  </div>;
+}
+
+function Outlets({outlets,saveOutlets,saveSales,sales}){
+  const[name,setName]=useState("");const[editing,setEditing]=useState(null);const[editName,setEditName]=useState("");
+  const inp={fontSize:14,padding:"8px 10px",borderRadius:8,border:"0.5px solid #e5e7eb",background:"#f3f4f6",color:"#111827",width:"100%",boxSizing:"border-box"};
+  return<div style={{padding:"12px 0"}}>
+    <div style={{display:"flex",gap:8,marginBottom:16}}>
+      <input value={name} onChange={e=>setName(e.target.value)} placeholder="New outlet name" style={{...inp,flex:1}} onKeyDown={e=>{if(e.key==="Enter"&&name.trim()){saveOutlets([...outlets,{id:Date.now(),name:name.trim()}]);setName("")}}}/>
+      <button onClick={()=>{if(!name.trim())return;saveOutlets([...outlets,{id:Date.now(),name:name.trim()}]);setName("")}} style={{padding:"8px 14px",borderRadius:8,border:"none",background:"#2563eb",color:"#fff",cursor:"pointer",fontSize:14,fontWeight:500}}>Add</button>
+    </div>
+    {outlets.map(o=><div key={o.id} style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:12,padding:"10px 14px",marginBottom:8,display:"flex",alignItems:"center",gap:8}}>
+      {editing===o.id?(
+        <><input value={editName} onChange={e=>setEditName(e.target.value)} style={{...inp,flex:1}}/>
+        <button onClick={()=>{saveOutlets(outlets.map(x=>x.id===o.id?{...x,name:editName.trim()}:x));setEditing(null)}} style={{padding:"6px 10px",borderRadius:8,border:"none",background:"#16a34a",color:"#fff",cursor:"pointer",fontSize:12}}>Save</button>
+        <button onClick={()=>setEditing(null)} style={{padding:"6px 10px",borderRadius:8,border:"0.5px solid #e5e7eb",background:"none",color:"#6b7280",cursor:"pointer",fontSize:12}}>Cancel</button></>
+      ):(
+        <><i className="ti ti-building-store" style={{fontSize:18,color:"#6b7280"}}/>
+        <span style={{flex:1,fontSize:14,color:"#111827"}}>{o.name}</span>
+        <button onClick={()=>{setEditing(o.id);setEditName(o.name)}} style={{padding:"7px 12px",border:"none",borderRadius:8,background:"#2563eb",color:"#fff",cursor:"pointer",fontSize:12,fontWeight:500}}>Edit</button>
+        <button onClick={()=>{saveOutlets(outlets.filter(x=>x.id!==o.id));saveSales(sales.filter(s=>s.outletId!==o.id))}} style={{padding:"7px 12px",border:"none",borderRadius:8,background:"#dc2626",color:"#fff",cursor:"pointer",fontSize:12,fontWeight:500}}>Delete</button></>
+      )}
+    </div>)}
+  </div>;
+}
+
+function SKUs({skus,saveSkus,saveSales,sales}){
+  const[form,setForm]=useState({name:"",price:""});const[editing,setEditing]=useState(null);const[editForm,setEditForm]=useState({});
+  const inp={fontSize:13,padding:"7px 9px",borderRadius:8,border:"0.5px solid #e5e7eb",background:"#f3f4f6",color:"#111827",width:"100%",boxSizing:"border-box"};
+  return<div style={{padding:"12px 0"}}>
+    <div style={{background:"#f9fafb",borderRadius:12,padding:12,marginBottom:16,border:"0.5px solid #e5e7eb"}}>
+      <div style={{fontSize:13,fontWeight:500,marginBottom:10}}>Add SKU</div>
+      <input value={form.name} onChange={e=>setForm({...form,name:e.target.value})} placeholder="SKU name" style={{...inp,marginBottom:8}}/>
+      <div style={{marginBottom:10}}><div style={{fontSize:11,color:"#6b7280",marginBottom:4}}>Selling price (₱)</div><input type="number" value={form.price} onChange={e=>setForm({...form,price:e.target.value})} placeholder="0" style={inp}/></div>
+      <button onClick={()=>{if(!form.name.trim()||!form.price)return;saveSkus([...skus,{id:Date.now(),name:form.name.trim(),price:Number(form.price)}]);setForm({name:"",price:""})}} style={{width:"100%",padding:"8px",borderRadius:8,border:"none",background:"#2563eb",color:"#fff",cursor:"pointer",fontSize:13}}>Add SKU</button>
+    </div>
+    {skus.map(s=><div key={s.id} style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:12,padding:"10px 14px",marginBottom:8}}>
+      {editing===s.id?(
+        <><input value={editForm.name} onChange={e=>setEditForm({...editForm,name:e.target.value})} style={{...inp,marginBottom:8}}/>
+        <div style={{marginBottom:8}}><div style={{fontSize:11,color:"#6b7280",marginBottom:4}}>Selling price (₱)</div><input type="number" value={editForm.price} onChange={e=>setEditForm({...editForm,price:e.target.value})} style={inp}/></div>
+        <div style={{display:"flex",gap:8}}>
+          <button onClick={()=>{saveSkus(skus.map(x=>x.id===s.id?{...x,name:editForm.name,price:Number(editForm.price)}:x));setEditing(null)}} style={{flex:1,padding:"6px",borderRadius:8,border:"none",background:"#16a34a",color:"#fff",cursor:"pointer",fontSize:12}}>Save</button>
+          <button onClick={()=>setEditing(null)} style={{flex:1,padding:"6px",borderRadius:8,border:"0.5px solid #e5e7eb",background:"none",color:"#6b7280",cursor:"pointer",fontSize:12}}>Cancel</button>
+        </div></>
+      ):(
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <div style={{flex:1}}><div style={{fontSize:14,fontWeight:500,color:"#111827"}}>{s.name}</div><div style={{fontSize:12,color:"#6b7280"}}>Price: {fmt(s.price)}</div></div>
+          <button onClick={()=>{setEditing(s.id);setEditForm({name:s.name,price:s.price})}} style={{padding:"7px 12px",border:"none",borderRadius:8,background:"#2563eb",color:"#fff",cursor:"pointer",fontSize:12,fontWeight:500}}>Edit</button>
+          <button onClick={()=>{saveSkus(skus.filter(x=>x.id!==s.id));saveSales(sales.filter(x=>x.skuId!==s.id))}} style={{padding:"7px 12px",border:"none",borderRadius:8,background:"#dc2626",color:"#fff",cursor:"pointer",fontSize:12,fontWeight:500}}>Delete</button>
+        </div>
+      )}
+    </div>)}
+  </div>;
+}
+
+function UsersAdmin({users,saveUsers}){
+  const[form,setForm]=useState({name:"",role:"staff",pin:""});const[editing,setEditing]=useState(null);const[editForm,setEditForm]=useState({});const[msg,setMsg]=useState("");
+  function flash(m){setMsg(m);setTimeout(()=>setMsg(""),2500)}
+  const inp={fontSize:13,padding:"7px 9px",borderRadius:8,border:"0.5px solid #e5e7eb",background:"#f3f4f6",color:"#111827",width:"100%",boxSizing:"border-box"};
+  return<div style={{padding:"12px 0"}}>
+    <div style={{background:"#f9fafb",borderRadius:12,padding:12,marginBottom:16,border:"0.5px solid #e5e7eb"}}>
+      <div style={{fontSize:13,fontWeight:500,marginBottom:10}}>Add User</div>
+      <input value={form.name} onChange={e=>setForm({...form,name:e.target.value})} placeholder="Full name" style={{...inp,marginBottom:8}}/>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+        <div><div style={{fontSize:11,color:"#6b7280",marginBottom:4}}>Role</div><select value={form.role} onChange={e=>setForm({...form,role:e.target.value})} style={inp}><option value="staff">Staff</option><option value="admin">Admin</option></select></div>
+        <div><div style={{fontSize:11,color:"#6b7280",marginBottom:4}}>PIN (4 digits)</div><input type="password" inputMode="numeric" maxLength={4} value={form.pin} onChange={e=>setForm({...form,pin:e.target.value.replace(/\D/g,"")})} placeholder="Optional" style={inp}/></div>
+      </div>
+      <button onClick={()=>{if(!form.name.trim()){flash("Name is required.");return}if(form.pin&&(form.pin.length!==4||!/^\d+$/.test(form.pin))){flash("PIN must be 4 digits.");return}saveUsers([...users,{id:Date.now(),name:form.name.trim(),role:form.role,pin:form.pin||""}]);setForm({name:"",role:"staff",pin:""});flash("User added!")}} style={{width:"100%",padding:"8px",borderRadius:8,border:"none",background:"#2563eb",color:"#fff",cursor:"pointer",fontSize:13,marginTop:4}}>Add User</button>
+    </div>
+    {msg&&<div style={{fontSize:13,color:msg.includes("!")?"#16a34a":"#dc2626",marginBottom:10}}>{msg}</div>}
+    {users.map((u,i)=>{const color=USER_COLORS[i%USER_COLORS.length];return(
+      <div key={u.id} style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:12,padding:"10px 14px",marginBottom:8}}>
+        {editing===u.id?(
+          <><input value={editForm.name} onChange={e=>setEditForm({...editForm,name:e.target.value})} style={{...inp,marginBottom:8}}/>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+            <div><div style={{fontSize:11,color:"#6b7280",marginBottom:4}}>Role</div><select value={editForm.role} onChange={e=>setEditForm({...editForm,role:e.target.value})} style={inp}><option value="staff">Staff</option><option value="admin">Admin</option></select></div>
+            <div><div style={{fontSize:11,color:"#6b7280",marginBottom:4}}>New PIN</div><input type="password" inputMode="numeric" maxLength={4} value={editForm.pin} onChange={e=>setEditForm({...editForm,pin:e.target.value.replace(/\D/g,"")})} placeholder="4 digits" style={inp}/></div>
+          </div>
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={()=>{if(!editForm.name.trim())return;if(editForm.pin&&(editForm.pin.length!==4||!/^\d+$/.test(editForm.pin))){flash("PIN must be 4 digits.");return}saveUsers(users.map(x=>x.id===u.id?{...x,name:editForm.name.trim(),role:editForm.role,pin:editForm.pin}:x));setEditing(null)}} style={{flex:1,padding:"6px",borderRadius:8,border:"none",background:"#16a34a",color:"#fff",cursor:"pointer",fontSize:12}}>Save</button>
+            <button onClick={()=>setEditing(null)} style={{flex:1,padding:"6px",borderRadius:8,border:"0.5px solid #e5e7eb",background:"none",color:"#6b7280",cursor:"pointer",fontSize:12}}>Cancel</button>
+          </div></>
+        ):(
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
+            <Avatar name={u.name} color={color} size={34}/>
+            <div style={{flex:1}}><div style={{fontSize:14,fontWeight:500,color:"#111827"}}>{u.name}</div>
+            <div style={{display:"flex",alignItems:"center",gap:6,marginTop:2}}><span style={{fontSize:10,padding:"2px 7px",borderRadius:4,background:u.role==="admin"?"#d1fae5":"#f3f4f6",color:u.role==="admin"?"#059669":"#6b7280"}}>{u.role==="admin"?"Admin":"Staff"}</span>{u.pin&&<span style={{fontSize:10,color:"#6b7280"}}><i className="ti ti-lock" style={{fontSize:11,marginRight:2}}/>PIN set</span>}</div></div>
+            <button onClick={()=>{setEditing(u.id);setEditForm({name:u.name,role:u.role,pin:u.pin||""})}} style={{padding:"7px 12px",border:"none",borderRadius:8,background:"#2563eb",color:"#fff",cursor:"pointer",fontSize:12,fontWeight:500}}>Edit</button>
+            <button onClick={()=>{const admins=users.filter(x=>x.role==="admin"&&x.id!==u.id);if(admins.length===0&&u.role==="admin"){flash("Cannot delete the last admin.");return}saveUsers(users.filter(x=>x.id!==u.id))}} style={{padding:"7px 12px",border:"none",borderRadius:8,background:"#dc2626",color:"#fff",cursor:"pointer",fontSize:12,fontWeight:500}}>Delete</button>
+          </div>
+        )}
+      </div>
+    );})}
+  </div>;
+}
+
+function QuotaManager({outlets,quotas,saveQuotas}){
+  const[editing,setEditing]=useState(null);const[val,setVal]=useState("");const[msg,setMsg]=useState("");
+  function flash(m){setMsg(m);setTimeout(()=>setMsg(""),2000)}
+  function save(id){const n=Number(val);if(isNaN(n)||n<0){flash("Enter a valid amount.");return}saveQuotas({...quotas,[id]:n});setEditing(null);flash("Quota saved!")}
+  return<div style={{padding:"12px 0"}}>
+    <div style={{fontSize:13,color:"#6b7280",marginBottom:14}}>Set daily revenue quota per outlet. Cards turn green when hit, red when missed.</div>
+    {msg&&<div style={{fontSize:13,color:"#16a34a",marginBottom:10}}>{msg}</div>}
+    {outlets.map(o=>{const q=quotas[o.id]||0;return(
+      <div key={o.id} style={{background:"#fff",border:"0.5px solid #e5e7eb",borderRadius:12,padding:"12px 14px",marginBottom:10}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:editing===o.id?10:0}}>
+          <div><div style={{fontSize:14,fontWeight:600,color:"#111827"}}>{o.name}</div><div style={{fontSize:12,color:q>0?"#6b7280":"#9ca3af",marginTop:2}}>{q>0?`Quota: ${fmt(q)}`:"No quota set"}</div></div>
+          {editing!==o.id&&<button onClick={()=>{setEditing(o.id);setVal(q||"")}} style={{padding:"7px 14px",border:"none",borderRadius:8,background:"#2563eb",color:"#fff",cursor:"pointer",fontSize:12,fontWeight:500}}>{q>0?"Edit":"Set Quota"}</button>}
+        </div>
+        {editing===o.id&&<div>
+          <div style={{fontSize:12,color:"#6b7280",marginBottom:4}}>Daily Revenue Quota (₱)</div>
+          <input type="number" min="0" value={val} onChange={e=>setVal(e.target.value)} placeholder="e.g. 10000" style={{width:"100%",fontSize:14,padding:"8px 10px",borderRadius:8,border:"0.5px solid #e5e7eb",background:"#f3f4f6",color:"#111827",boxSizing:"border-box",marginBottom:10}}/>
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={()=>save(o.id)} style={{flex:1,padding:"8px",borderRadius:8,border:"none",background:"#16a34a",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:600}}>Save</button>
+            <button onClick={()=>{if(q>0){saveQuotas({...quotas,[o.id]:0});flash("Quota removed!")}setEditing(null)}} style={{flex:1,padding:"8px",borderRadius:8,border:"0.5px solid #e5e7eb",background:"none",color:"#dc2626",cursor:"pointer",fontSize:13}}>Remove</button>
+            <button onClick={()=>setEditing(null)} style={{flex:1,padding:"8px",borderRadius:8,border:"0.5px solid #e5e7eb",background:"none",color:"#6b7280",cursor:"pointer",fontSize:13}}>Cancel</button>
+          </div>
+        </div>}
+      </div>
+    );})}
+  </div>;
+}
+
+ReactDOM.render(<App/>,document.getElementById("root"));
+</script>
+</body>
+</html>

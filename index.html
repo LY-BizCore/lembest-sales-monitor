@@ -43,8 +43,10 @@ const DEFAULT_SKUS=[{id:1,name:"Lechon Manok",price:280},{id:2,name:"Liempo",pri
 const DEFAULT_USERS=[{id:1,name:"Admin",role:"admin",pin:"1234"}];
 const TABS_ADMIN=["Dashboard","Entry","Outlets","SKUs","Users","Quotas","Profile"];
 const TABS_USER=["Dashboard","Entry","Profile"];
+const TABS_OWNER=["Dashboard"];
 const ICONS_ADMIN=["ti-chart-bar","ti-plus","ti-building-store","ti-tag","ti-users","ti-target","ti-user-circle"];
 const ICONS_USER=["ti-chart-bar","ti-plus","ti-user-circle"];
+const ICONS_OWNER=["ti-chart-bar"];
 const TAB_COLORS=["#1d9e75","#d85a30","#7f77dd","#ba7517","#185fa5","#b45309","#7c3aed"];
 
 function today(){return new Date().toISOString().slice(0,10)}
@@ -119,22 +121,26 @@ function App(){
   if(!activeUser)return<UserSelect users={users} saveUsers={saveUsers} onSelect={setActiveUser}/>;
 
   const isAdmin=activeUser.role==="admin";
-  const TABS=isAdmin?TABS_ADMIN:TABS_USER;
-  const ICONS=isAdmin?ICONS_ADMIN:ICONS_USER;
+  const isOwner=activeUser.role==="owner";
+  const TABS=isAdmin?TABS_ADMIN:isOwner?TABS_OWNER:TABS_USER;
+  const ICONS=isAdmin?ICONS_ADMIN:isOwner?ICONS_OWNER:ICONS_USER;
   const userColor=USER_COLORS[users.findIndex(u=>u.id===activeUser.id)%USER_COLORS.length]||"#1d9e75";
   const safeTab=Math.min(tab,TABS.length-1);
-  const staffOutlets=isAdmin?outlets:outlets.filter(o=>sales.some(s=>s.outletId===o.id&&s.enteredBy===activeUser.name));
+  const staffOutlets=isAdmin||isOwner?outlets:outlets.filter(o=>sales.some(s=>s.outletId===o.id&&s.enteredBy===activeUser.name));
 
   const pages=isAdmin?[
-    <Dashboard key="d" outlets={outlets} skus={skus} sales={sales} saveSales={saveSales} expenses={expenses} saveExpenses={saveExpenses} quotas={quotas} allOutlets={outlets}/>,
+    <Dashboard key="d" outlets={outlets} skus={skus} sales={sales} saveSales={saveSales} expenses={expenses} saveExpenses={saveExpenses} quotas={quotas} allOutlets={outlets} readOnly={false}/>,
     <Entry key="e" outlets={outlets} skus={skus} sales={sales} saveSales={saveSales} activeUser={activeUser} expenses={expenses} saveExpenses={saveExpenses} users={users}/>,
     <Outlets key="o" outlets={outlets} saveOutlets={saveOutlets} saveSales={saveSales} sales={sales}/>,
     <SKUs key="s" skus={skus} saveSkus={saveSkus} saveSales={saveSales} sales={sales}/>,
     <UsersAdmin key="u" users={users} saveUsers={saveUsers}/>,
     <QuotaManager key="q" outlets={outlets} quotas={quotas} saveQuotas={saveQuotas}/>,
     <StoreProfile key="p" outlets={outlets} skus={skus} sales={sales} expenses={expenses} activeUser={activeUser} isAdmin={true} sales_all={sales} expenses_all={expenses} exportToExcel={exportToExcel}/>,
+  ]:isOwner?[
+    <Dashboard key="d" outlets={outlets} skus={skus} sales={sales} saveSales={saveSales} expenses={expenses} saveExpenses={saveExpenses} quotas={quotas} allOutlets={outlets} readOnly={true}/>,
+    <StoreProfile key="p" outlets={outlets} skus={skus} sales={sales} expenses={expenses} activeUser={activeUser} isAdmin={false} sales_all={sales} expenses_all={expenses} exportToExcel={exportToExcel}/>,
   ]:[
-    <Dashboard key="d" outlets={staffOutlets} skus={skus} sales={sales} saveSales={saveSales} expenses={expenses} saveExpenses={saveExpenses} quotas={quotas} allOutlets={outlets}/>,
+    <Dashboard key="d" outlets={staffOutlets} skus={skus} sales={sales} saveSales={saveSales} expenses={expenses} saveExpenses={saveExpenses} quotas={quotas} allOutlets={outlets} readOnly={false}/>,
     <Entry key="e" outlets={outlets} skus={skus} sales={sales} saveSales={saveSales} activeUser={activeUser} expenses={expenses} saveExpenses={saveExpenses} users={users}/>,
     <StoreProfile key="p" outlets={staffOutlets} skus={skus} sales={sales} expenses={expenses} activeUser={activeUser} isAdmin={false} sales_all={sales} expenses_all={expenses} exportToExcel={exportToExcel}/>,
   ];
@@ -154,6 +160,7 @@ function App(){
           <Avatar name={activeUser.name} color={userColor} size={24}/>
           <span style={{fontSize:12,color:userColor,fontWeight:500}}>{activeUser.name}</span>
           {isAdmin&&<span style={{fontSize:10,background:userColor,color:"#fff",borderRadius:4,padding:"1px 5px"}}>Admin</span>}
+          {isOwner&&<span style={{fontSize:10,background:"#7c3aed",color:"#fff",borderRadius:4,padding:"1px 5px"}}>Owner</span>}
         </button>
       </div>
       <div style={{padding:"0 12px"}}>{pages[safeTab]}</div>
@@ -230,7 +237,7 @@ function UserSelect({users,saveUsers,onSelect}){
               <div style={{flex:1}}>
                 <div style={{fontSize:14,fontWeight:600,color:"#111827"}}>{u.name}</div>
                 <div style={{fontSize:11,color:"#6b7280",marginTop:2,display:"flex",gap:5}}>
-                  <span style={{padding:"1px 7px",borderRadius:4,background:u.role==="admin"?"#d1fae5":"#f3f4f6",color:u.role==="admin"?"#059669":"#6b7280",fontWeight:500}}>{u.role==="admin"?"Admin":"Staff"}</span>
+                  <span style={{padding:"1px 7px",borderRadius:4,background:u.role==="admin"?"#d1fae5":u.role==="owner"?"#ede9fe":"#f3f4f6",color:u.role==="admin"?"#059669":u.role==="owner"?"#7c3aed":"#6b7280",fontWeight:500}}>{u.role==="admin"?"Admin":u.role==="owner"?"Owner":"Staff"}</span>
                   {u.pin&&<span><i className="ti ti-lock" style={{fontSize:10,marginRight:2}}/>PIN</span>}
                 </div>
               </div>
@@ -245,7 +252,7 @@ function UserSelect({users,saveUsers,onSelect}){
   </div>;
 }
 
-function Dashboard({outlets,skus,sales,saveSales,expenses,saveExpenses,quotas,allOutlets}){
+function Dashboard({outlets,skus,sales,saveSales,expenses,saveExpenses,quotas,allOutlets,readOnly=false,isAdmin=false}){
   const[dateFilter,setDateFilter]=useState(today());
   const[editingSale,setEditingSale]=useState(null);
   const[editSaleForm,setEditSaleForm]=useState({});
@@ -346,12 +353,12 @@ function Dashboard({outlets,skus,sales,saveSales,expenses,saveExpenses,quotas,al
                 ):(
                   <div key={sid} style={{display:"flex",alignItems:"center",justifyContent:"flex-end",gap:6,marginBottom:4}}>
                     <span style={{fontSize:11,color:"#6b7280"}}>{sale.enteredBy||"—"} · qty {sale.qty}</span>
-                    {isToday?(
+                    {isToday&&!readOnly?(
                       <>
                         <button onPointerDown={e=>{e.stopPropagation();setEditingSale(sid);setEditSaleForm({skuId:sale.skuId,qty:sale.qty})}} style={btnBlue}>Edit</button>
                         <button onPointerDown={e=>{e.stopPropagation();deleteSale(sid)}} style={btnRed}>Delete</button>
                       </>
-                    ):<span style={{fontSize:10,background:"#f3f4f6",color:"#9ca3af",borderRadius:4,padding:"2px 8px"}}>🔒 Locked</span>}
+                    ):<span style={{fontSize:10,background:"#f3f4f6",color:"#9ca3af",borderRadius:4,padding:"2px 8px"}}>{readOnly?"👁 View only":"🔒 Locked"}</span>}
                   </div>
                 );
               })}
@@ -374,12 +381,12 @@ function Dashboard({outlets,skus,sales,saveSales,expenses,saveExpenses,quotas,al
                 <div style={{display:"flex",alignItems:"flex-start",gap:6,marginBottom:6}}>
                   <div style={{flex:1}}><div style={{fontSize:12,fontWeight:500,color:"#111827"}}>{ex.description}</div>{ex.notes&&<div style={{fontSize:11,color:"#6b7280"}}>{ex.notes}</div>}<div style={{fontSize:11,color:"#6b7280"}}>by {ex.enteredBy||"—"}</div></div>
                   <span style={{fontSize:13,fontWeight:600,color:"#dc2626",marginRight:4}}>{fmt(ex.amount)}</span>
-                  {isToday?(
+                  {isToday&&!readOnly?(
                     <>
                       <button onPointerDown={e=>{e.stopPropagation();setEditingExp(ex.id);setEditExpForm({description:ex.description,amount:ex.amount,notes:ex.notes||""})}} style={btnBlue}>Edit</button>
                       <button onPointerDown={e=>{e.stopPropagation();deleteExp(ex.id)}} style={btnRed}>Delete</button>
                     </>
-                  ):<span style={{fontSize:10,background:"#f3f4f6",color:"#9ca3af",borderRadius:4,padding:"2px 8px"}}>🔒 Locked</span>}
+                  ):<span style={{fontSize:10,background:"#f3f4f6",color:"#9ca3af",borderRadius:4,padding:"2px 8px"}}>{readOnly?"👁 View only":"🔒 Locked"}</span>}
                 </div>
               )}
             </div>)}
@@ -743,7 +750,7 @@ function UsersAdmin({users,saveUsers}){
       <div style={{fontSize:13,fontWeight:500,marginBottom:10}}>Add User</div>
       <input value={form.name} onChange={e=>setForm({...form,name:e.target.value})} placeholder="Full name" style={{...inp,marginBottom:8}}/>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
-        <div><div style={{fontSize:11,color:"#6b7280",marginBottom:4}}>Role</div><select value={form.role} onChange={e=>setForm({...form,role:e.target.value})} style={inp}><option value="staff">Staff</option><option value="admin">Admin</option></select></div>
+        <div><div style={{fontSize:11,color:"#6b7280",marginBottom:4}}>Role</div><select value={form.role} onChange={e=>setForm({...form,role:e.target.value})} style={inp}><option value="staff">Staff</option><option value="admin">Admin</option><option value="owner">Owner</option></select></div>
         <div><div style={{fontSize:11,color:"#6b7280",marginBottom:4}}>PIN (4 digits)</div><input type="password" inputMode="numeric" maxLength={4} value={form.pin} onChange={e=>setForm({...form,pin:e.target.value.replace(/\D/g,"")})} placeholder="Optional" style={inp}/></div>
       </div>
       <button onClick={()=>{if(!form.name.trim()){flash("Name is required.");return}if(form.pin&&(form.pin.length!==4||!/^\d+$/.test(form.pin))){flash("PIN must be 4 digits.");return}saveUsers([...users,{id:Date.now(),name:form.name.trim(),role:form.role,pin:form.pin||""}]);setForm({name:"",role:"staff",pin:""});flash("User added!")}} style={{width:"100%",padding:"8px",borderRadius:8,border:"none",background:"#2563eb",color:"#fff",cursor:"pointer",fontSize:13,marginTop:4}}>Add User</button>
@@ -754,7 +761,7 @@ function UsersAdmin({users,saveUsers}){
         {editing===u.id?(
           <><input value={editForm.name} onChange={e=>setEditForm({...editForm,name:e.target.value})} style={{...inp,marginBottom:8}}/>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
-            <div><div style={{fontSize:11,color:"#6b7280",marginBottom:4}}>Role</div><select value={editForm.role} onChange={e=>setEditForm({...editForm,role:e.target.value})} style={inp}><option value="staff">Staff</option><option value="admin">Admin</option></select></div>
+            <div><div style={{fontSize:11,color:"#6b7280",marginBottom:4}}>Role</div><select value={editForm.role} onChange={e=>setEditForm({...editForm,role:e.target.value})} style={inp}><option value="staff">Staff</option><option value="admin">Admin</option><option value="owner">Owner</option></select></div>
             <div><div style={{fontSize:11,color:"#6b7280",marginBottom:4}}>New PIN</div><input type="password" inputMode="numeric" maxLength={4} value={editForm.pin} onChange={e=>setEditForm({...editForm,pin:e.target.value.replace(/\D/g,"")})} placeholder="4 digits" style={inp}/></div>
           </div>
           <div style={{display:"flex",gap:8}}>
@@ -765,7 +772,7 @@ function UsersAdmin({users,saveUsers}){
           <div style={{display:"flex",alignItems:"center",gap:10}}>
             <Avatar name={u.name} color={color} size={34}/>
             <div style={{flex:1}}><div style={{fontSize:14,fontWeight:500,color:"#111827"}}>{u.name}</div>
-            <div style={{display:"flex",alignItems:"center",gap:6,marginTop:2}}><span style={{fontSize:10,padding:"2px 7px",borderRadius:4,background:u.role==="admin"?"#d1fae5":"#f3f4f6",color:u.role==="admin"?"#059669":"#6b7280"}}>{u.role==="admin"?"Admin":"Staff"}</span>{u.pin&&<span style={{fontSize:10,color:"#6b7280"}}><i className="ti ti-lock" style={{fontSize:11,marginRight:2}}/>PIN set</span>}</div></div>
+            <div style={{display:"flex",alignItems:"center",gap:6,marginTop:2}}>                    <span style={{fontSize:10,padding:"2px 7px",borderRadius:4,background:u.role==="admin"?"#d1fae5":u.role==="owner"?"#ede9fe":"#f3f4f6",color:u.role==="admin"?"#059669":u.role==="owner"?"#7c3aed":"#6b7280"}}>{u.role==="admin"?"Admin":u.role==="owner"?"Owner":"Staff"}</span>{u.pin&&<span style={{fontSize:10,color:"#6b7280"}}><i className="ti ti-lock" style={{fontSize:11,marginRight:2}}/>PIN set</span>}</div></div>
             <button onClick={()=>{setEditing(u.id);setEditForm({name:u.name,role:u.role,pin:u.pin||""})}} style={{padding:"7px 12px",border:"none",borderRadius:8,background:"#2563eb",color:"#fff",cursor:"pointer",fontSize:12,fontWeight:500}}>Edit</button>
             <button onClick={()=>{const admins=users.filter(x=>x.role==="admin"&&x.id!==u.id);if(admins.length===0&&u.role==="admin"){flash("Cannot delete the last admin.");return}saveUsers(users.filter(x=>x.id!==u.id))}} style={{padding:"7px 12px",border:"none",borderRadius:8,background:"#dc2626",color:"#fff",cursor:"pointer",fontSize:12,fontWeight:500}}>Delete</button>
           </div>
